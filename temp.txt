@@ -1,0 +1,311 @@
+router/index.ts:
+
+import { createRouter, createWebHistory } from 'vue-router';
+import { useAuthStore } from '../stores/auth';
+import Login from '../views/Login.vue';
+import Home from '../views/Home.vue';
+import Roles from '../views/Roles.vue';
+import Profile from '../views/Profile.vue';
+
+const routes = [
+  { path: '/login', component: Login },
+  { 
+    path: '/', 
+    component: Home, 
+    meta: { requiresAuth: true } 
+  },
+  { 
+    path: '/roles', 
+    component: Roles, 
+    meta: { requiresAuth: true, requiresAdmin: true } 
+  },
+  { 
+    path: '/profile', 
+    component: Profile, 
+    meta: { requiresAuth: true } 
+  },
+];
+
+const router = createRouter({
+  history: createWebHistory(),
+  routes,
+});
+
+router.beforeEach((to, from, next) => {
+  const authStore = useAuthStore();
+  if (to.meta.requiresAuth && !authStore.isAuthenticated) {
+    next('/login');
+  } else if (to.meta.requiresAdmin && !authStore.isAdmin) {
+    next('/');
+  } else {
+    next();
+  }
+});
+
+export default router;
+
+stores/auth.ts:
+
+import { defineStore } from 'pinia';
+import axios from 'axios';
+import jwtDecode from 'jwt-decode';
+
+interface User {
+  id: string;
+  username: string;
+  roles: string[];
+}
+
+export const useAuthStore = defineStore('auth', {
+  state: () => ({
+    user: null as User | null,
+    token: localStorage.getItem('token') || '',
+  }),
+  getters: {
+    isAuthenticated: (state) => !!state.token,
+    isAdmin: (state) => state.user?.roles.includes('ADMIN') || false,
+  },
+  actions: {
+    async login(username: string, password: string) {
+      try {
+        const response = await axios.post('http://your-api-url/auth/login', { username, password });
+        this.token = response.data.token;
+        localStorage.setItem('token', this.token);
+        this.user = jwtDecode<User>(this.token);
+      } catch (error) {
+        console.error('Login failed', error);
+      }
+    },
+    logout() {
+      this.user = null;
+      this.token = '';
+      localStorage.removeItem('token');
+    },
+  },
+});
+
+types/index.ts:
+
+export interface Role {
+  id: string;
+  name: string;
+}
+
+export interface Profile {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+}
+
+App.vue:
+
+<template>
+  <nav class="navbar navbar-expand-lg navbar-light bg-light">
+    <div class="container">
+      <router-link class="navbar-brand" to="/">Vue JWT App</router-link>
+      <div v-if="authStore.isAuthenticated" class="navbar-nav">
+        <router-link class="nav-link" to="/profile">Profile</router-link>
+        <router-link v-if="authStore.isAdmin" class="nav-link" to="/roles">Roles</router-link>
+        <button class="btn btn-link nav-link" @click="authStore.logout">Logout</button>
+      </div>
+    </div>
+  </nav>
+  <router-view />
+</template>
+
+<script lang="ts">
+import { defineComponent } from 'vue';
+import { useAuthStore } from './stores/auth';
+
+export default defineComponent({
+  setup() {
+    const authStore = useAuthStore();
+    return { authStore };
+  },
+});
+</script>
+
+views/Login.vue:
+
+<template>
+  <div class="container mt-5">
+    <h2>Login</h2>
+    <form @submit.prevent="login">
+      <div class="mb-3">
+        <input v-model="username" type="text" class="form-control" placeholder="Username" required />
+      </div>
+      <div class="mb-3">
+        <input v-model="password" type="password" class="form-control" placeholder="Password" required />
+      </div>
+      <button type="submit" class="btn btn-primary">Login</button>
+    </form>
+  </div>
+</template>
+
+<script lang="ts">
+import { defineComponent } from 'vue';
+import { useAuthStore } from '../stores/auth';
+import { useRouter } from 'vue-router';
+
+export default defineComponent({
+  setup() {
+    const authStore = useAuthStore();
+    const router = useRouter();
+    let username = '';
+    let password = '';
+
+    const login = async () => {
+      await authStore.login(username, password);
+      if (authStore.isAuthenticated) router.push('/');
+    };
+
+    return { username, password, login };
+  },
+});
+</script>
+
+views/Roles.vue:
+
+<template>
+  <div class="container mt-5">
+    <h2>Roles Management</h2>
+    <button class="btn btn-success mb-3" @click="addRole">Add Role</button>
+    <ul class="list-group">
+      <li v-for="role in roles" :key="role.id" class="list-group-item d-flex justify-content-between">
+        <span>{{ role.name }}</span>
+        <div>
+          <button class="btn btn-warning btn-sm me-2" @click="editRole(role)">Edit</button>
+          <button class="btn btn-danger btn-sm" @click="deleteRole(role.id)">Delete</button>
+        </div>
+      </li>
+    </ul>
+  </div>
+</template>
+
+<script lang="ts">
+import { defineComponent, ref } from 'vue';
+import axios from 'axios';
+import { Role } from '../types';
+
+export default defineComponent({
+  setup() {
+    const roles = ref<Role[]>([]);
+
+    const fetchRoles = async () => {
+      const response = await axios.get('http://your-api-url/roles', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      roles.value = response.data;
+    };
+
+    const addRole = async () => {
+      const name = prompt('Enter role name');
+      if (name) {
+        await axios.post('http://your-api-url/roles', { name }, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+        });
+        fetchRoles();
+      }
+    };
+
+    const editRole = async (role: Role) => {
+      const name = prompt('Edit role name', role.name);
+      if (name) {
+        await axios.put(`http://your-api-url/roles/${role.id}`, { name }, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+        });
+        fetchRoles();
+      }
+    };
+
+    const deleteRole = async (id: string) => {
+      if (confirm('Are you sure?')) {
+        await axios.delete(`http://your-api-url/roles/${id}`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+        });
+        fetchRoles();
+      }
+    };
+
+    fetchRoles();
+    return { roles, addRole, editRole, deleteRole };
+  },
+});
+</script>
+
+views/Profile.vue:
+
+<template>
+  <div class="container mt-5">
+    <h2>Profile</h2>
+    <form @submit.prevent="saveProfile">
+      <div class="mb-3">
+        <input v-model="profile.firstName" class="form-control" placeholder="First Name" required />
+      </div>
+      <div class="mb-3">
+        <input v-model="profile.lastName" class="form-control" placeholder="Last Name" required />
+      </div>
+      <div class="mb-3">
+        <input v-model="profile.email" type="email" class="form-control" placeholder="Email" required />
+      </div>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+  </div>
+</template>
+
+<script lang="ts">
+import { defineComponent, ref } from 'vue';
+import axios from 'axios';
+import { Profile } from '../types';
+
+export default defineComponent({
+  setup() {
+    const profile = ref<Profile>({
+      id: '',
+      firstName: '',
+      lastName: '',
+      email: '',
+    });
+
+    const fetchProfile = async () => {
+      const response = await axios.get('http://your-api-url/profile', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      profile.value = response.data;
+    };
+
+    const saveProfile = async () => {
+      await axios.put('http://your-api-url/profile', profile.value, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      alert('Profile saved!');
+    };
+
+    fetchProfile();
+    return { profile, saveProfile };
+  },
+});
+</script>
+
+views/Home.vue:
+
+<template>
+  <div class="container mt-5">
+    <h2>Welcome, {{ authStore.user?.username }}</h2>
+  </div>
+</template>
+
+<script lang="ts">
+import { defineComponent } from 'vue';
+import { useAuthStore } from '../stores/auth';
+
+export default defineComponent({
+  setup() {
+    const authStore = useAuthStore();
+    return { authStore };
+  },
+});
+</script>
+
+
