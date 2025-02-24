@@ -308,4 +308,564 @@ export default defineComponent({
 });
 </script>
 
+/////// >>>>>>>
+
+
+entity/User.java:
+
+package com.example.jwtapp.entity;
+
+import lombok.Data;
+import jakarta.persistence.*;
+import java.util.Set;
+
+@Data
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String username;
+    private String password;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(
+        name = "user_roles",
+        joinColumns = @JoinColumn(name = "user_id"),
+        inverseJoinColumns = @JoinColumn(name = "role_id")
+    )
+    private Set<Role> roles;
+}
+
+entity/Role.java:
+
+package com.example.jwtapp.entity;
+
+import lombok.Data;
+import jakarta.persistence.*;
+
+@Data
+@Entity
+@Table(name = "roles")
+public class Role {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String name;
+}
+
+entity/Profile.java:
+
+package com.example.jwtapp.entity;
+
+import lombok.Data;
+import jakarta.persistence.*;
+
+@Data
+@Entity
+@Table(name = "profiles")
+public class Profile {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String firstName;
+    private String lastName;
+    private String email;
+
+    @OneToOne
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+}
+
+repository/UserRepository.java:
+
+package com.example.jwtapp.repository;
+
+import com.example.jwtapp.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByUsername(String username);
+}
+
+repository/ProfileRepository.java:
+
+package com.example.jwtapp.repository;
+
+import com.example.jwtapp.entity.Profile;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface ProfileRepository extends JpaRepository<Profile, Long> {
+    Profile findByUserId(Long userId);
+}
+
+config/JwtTokenProvider.java:
+
+package com.example.jwtapp.config;
+
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
+import org.springframework.stereotype.Component;
+
+import java.util.Date;
+import java.util.stream.Collectors;
+
+@Component
+public class JwtTokenProvider {
+
+    @Value("${jwt.secret}")
+    private String jwtSecret;
+
+    @Value("${jwt.expiration}")
+    private long jwtExpiration;
+
+    public String generateToken(Authentication authentication) {
+        org.springframework.security.core.userdetails.User userPrincipal = 
+            (org.springframework.security.core.userdetails.User) authentication.getPrincipal();
+
+        return Jwts.builder()
+            .setSubject(userPrincipal.getUsername())
+            .claim("roles", userPrincipal.getAuthorities().stream()
+                .map(Object::toString).collect(Collectors.toList()))
+            .setIssuedAt(new Date())
+            .setExpiration(new Date(new Date().getTime() + jwtExpiration))
+            .signWith(SignatureAlgorithm.HS512, jwtSecret)
+            .compact();
+    }
+
+    public String getUsernameFromJWT(String token) {
+        return Jwts.parser().setSigningKey(jwtSecret).parseClaimsJws(token).getBody().getSubject();
+    }
+
+    public boolean validateToken(String token) {
+        try {
+            Jwts.parser().setSigningKey(jwtSecret).parseClaimsJws(token);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+}
+
+config/JwtAuthenticationFilter.java:
+
+package com.example.jwtapp.config;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtTokenProvider tokenProvider;
+    private final UserDetailsService userDetailsService;
+
+    public JwtAuthenticationFilter(JwtTokenProvider tokenProvider, UserDetailsService userDetailsService) {
+        this.tokenProvider = tokenProvider;
+        this.userDetailsService = userDetailsService;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws IOException, jakarta.servlet.ServletException {
+        String jwt = getJwtFromRequest(request);
+        if (jwt != null && tokenProvider.validateToken(jwt)) {
+            String username = tokenProvider.getUsernameFromJWT(jwt);
+            UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+            UsernamePasswordAuthenticationToken authentication = 
+                new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+            authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+        }
+        filterChain.doFilter(request, response);
+    }
+
+    private String getJwtFromRequest(HttpServletRequest request) {
+        String bearerToken = request.getHeader("Authorization");
+        if (bearerToken != null && bearerToken.startsWith("Bearer ")) {
+            return bearerToken.substring(7);
+        }
+        return null;
+    }
+}
+
+config/SecurityConfig.java:
+
+package com.example.jwtapp.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final UserDetailsService userDetailsService;
+
+    public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter, UserDetailsService userDetailsService) {
+        this.jwtAuthenticationFilter = jwtAuthenticationFilter;
+        this.userDetailsService = userDetailsService;
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            .and()
+            .authorizeHttpRequests()
+            .requestMatchers("/auth/**").permitAll()
+            .requestMatchers("/roles/**").hasRole("ADMIN")
+            .anyRequest().authenticated()
+            .and()
+            .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public BCryptPasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+
+service/UserService.java:
+
+package com.example.jwtapp.service;
+
+import com.example.jwtapp.entity.User;
+import com.example.jwtapp.repository.UserRepository;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.stereotype.Service;
+
+import java.util.Optional;
+
+@Service
+public class UserService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+    private final BCryptPasswordEncoder passwordEncoder;
+
+    public UserService(UserRepository userRepository, BCryptPasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username)
+            .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+        return org.springframework.security.core.userdetails.User
+            .withUsername(user.getUsername())
+            .password(user.getPassword())
+            .authorities(user.getRoles().stream().map(role -> "ROLE_" + role.getName()).toArray(String[]::new))
+            .build();
+    }
+
+    public Optional<User> findByUsername(String username) {
+        return userRepository.findByUsername(username);
+    }
+
+    public void save(User user) {
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        userRepository.save(user);
+    }
+}
+
+service/RoleService.java:
+
+package com.example.jwtapp.service;
+
+import com.example.jwtapp.entity.Role;
+import com.example.jwtapp.repository.RoleRepository;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class RoleService {
+
+    private final RoleRepository roleRepository;
+
+    public RoleService(RoleRepository roleRepository) {
+        this.roleRepository = roleRepository;
+    }
+
+    public List<Role> findAll() {
+        return roleRepository.findAll();
+    }
+
+    public Role save(Role role) {
+        return roleRepository.save(role);
+    }
+
+    public void delete(Long id) {
+        roleRepository.deleteById(id);
+    }
+
+    public Role findById(Long id) {
+        return roleRepository.findById(id).orElseThrow(() -> new RuntimeException("Role not found"));
+    }
+}
+
+service/ProfileService.java:
+
+package com.example.jwtapp.service;
+
+import com.example.jwtapp.entity.Profile;
+import com.example.jwtapp.repository.ProfileRepository;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ProfileService {
+
+    private final ProfileRepository profileRepository;
+
+    public ProfileService(ProfileRepository profileRepository) {
+        this.profileRepository = profileRepository;
+    }
+
+    public Profile findByUserId(Long userId) {
+        return profileRepository.findByUserId(userId);
+    }
+
+    public Profile save(Profile profile) {
+        return profileRepository.save(profile);
+    }
+}
+
+controller/AuthController.java:
+
+package com.example.jwtapp.controller;
+
+import com.example.jwtapp.config.JwtTokenProvider;
+import com.example.jwtapp.entity.User;
+import com.example.jwtapp.service.UserService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/auth")
+public class AuthController {
+
+    private final AuthenticationManager authenticationManager;
+    private final JwtTokenProvider tokenProvider;
+    private final UserService userService;
+
+    public AuthController(AuthenticationManager authenticationManager, JwtTokenProvider tokenProvider, UserService userService) {
+        this.authenticationManager = authenticationManager;
+        this.tokenProvider = tokenProvider;
+        this.userService = userService;
+    }
+
+    @PostMapping("/login")
+    public ResponseEntity<?> authenticateUser(@RequestBody LoginRequest loginRequest) {
+        Authentication authentication = authenticationManager.authenticate(
+            new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword())
+        );
+        String jwt = tokenProvider.generateToken(authentication);
+        return ResponseEntity.ok(new JwtResponse(jwt));
+    }
+
+    static class LoginRequest {
+        private String username;
+        private String password;
+
+        public String getUsername() { return username; }
+        public void setUsername(String username) { this.username = username; }
+        public String getPassword() { return password; }
+        public void setPassword(String password) { this.password = password; }
+    }
+
+    static class JwtResponse {
+        private String token;
+
+        public JwtResponse(String token) { this.token = token; }
+        public String getToken() { return token; }
+        public void setToken(String token) { this.token = token; }
+    }
+}
+
+controller/RoleController.java:
+
+package com.example.jwtapp.controller;
+
+import com.example.jwtapp.entity.Role;
+import com.example.jwtapp.service.RoleService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/roles")
+public class RoleController {
+
+    private final RoleService roleService;
+
+    public RoleController(RoleService roleService) {
+        this.roleService = roleService;
+    }
+
+    @GetMapping
+    public List<Role> getAllRoles() {
+        return roleService.findAll();
+    }
+
+    @PostMapping
+    public Role createRole(@RequestBody Role role) {
+        return roleService.save(role);
+    }
+
+    @PutMapping("/{id}")
+    public Role updateRole(@PathVariable Long id, @RequestBody Role role) {
+        Role existingRole = roleService.findById(id);
+        existingRole.setName(role.getName());
+        return roleService.save(existingRole);
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> deleteRole(@PathVariable Long id) {
+        roleService.delete(id);
+        return ResponseEntity.ok().build();
+    }
+}
+
+controller/ProfileController.java:
+
+package com.example.jwtapp.controller;
+
+import com.example.jwtapp.entity.Profile;
+import com.example.jwtapp.service.ProfileService;
+import com.example.jwtapp.service.UserService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/profile")
+public class ProfileController {
+
+    private final ProfileService profileService;
+    private final UserService userService;
+
+    public ProfileController(ProfileService profileService, UserService userService) {
+        this.profileService = profileService;
+        this.userService = userService;
+    }
+
+    @GetMapping
+    public ResponseEntity<Profile> getProfile() {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        Long userId = userService.findByUsername(username).get().getId();
+        Profile profile = profileService.findByUserId(userId);
+        return ResponseEntity.ok(profile);
+    }
+
+    @PutMapping
+    public ResponseEntity<Profile> updateProfile(@RequestBody Profile profile) {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        Long userId = userService.findByUsername(username).get().getId();
+        Profile existingProfile = profileService.findByUserId(userId);
+        existingProfile.setFirstName(profile.getFirstName());
+        existingProfile.setLastName(profile.getLastName());
+        existingProfile.setEmail(profile.getEmail());
+        return ResponseEntity.ok(profileService.save(existingProfile));
+    }
+}
+
+JwtAppApplication.java:
+
+package com.example.jwtapp;
+
+import com.example.jwtapp.entity.Profile;
+import com.example.jwtapp.entity.Role;
+import com.example.jwtapp.entity.User;
+import com.example.jwtapp.service.RoleService;
+import com.example.jwtapp.service.UserService;
+import com.example.jwtapp.service.ProfileService;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.util.HashSet;
+
+@SpringBootApplication
+public class JwtAppApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(JwtAppApplication.class, args);
+    }
+
+    @Bean
+    CommandLineRunner init(UserService userService, RoleService roleService, ProfileService profileService) {
+        return args -> {
+            // Criar roles iniciais
+            Role adminRole = new Role();
+            adminRole.setName("ADMIN");
+            roleService.save(adminRole);
+
+            Role userRole = new Role();
+            userRole.setName("USER");
+            roleService.save(userRole);
+
+            // Criar usuário admin
+            User admin = new User();
+            admin.setUsername("admin");
+            admin.setPassword("admin123");
+            admin.setRoles(new HashSet<>() {{ add(adminRole); add(userRole); }});
+            userService.save(admin);
+
+            Profile adminProfile = new Profile();
+            adminProfile.setFirstName("Admin");
+            adminProfile.setLastName("User");
+            adminProfile.setEmail("admin@example.com");
+            adminProfile.setUser(admin);
+            profileService.save(adminProfile);
+
+            // Criar usuário comum
+            User user = new User();
+            user.setUsername("user");
+            user.setPassword("user123");
+            user.setRoles(new HashSet<>() {{ add(userRole); }});
+            userService.save(user);
+
+            Profile userProfile = new Profile();
+            userProfile.setFirstName("Regular");
+            userProfile.setLastName("User");
+            userProfile.setEmail("user@example.com");
+            userProfile.setUser(user);
+            profileService.save(userProfile);
+        };
+    }
+}
 
